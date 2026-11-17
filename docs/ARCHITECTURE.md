@@ -1,0 +1,799 @@
+# Shadow Quest: The Lost Realm — Technical Architecture
+
+## Phase 3.5 current contract: November 15, 2026
+
+The opening cinematic sits between the title screen and Mystic Forest gameplay.
+cutscene/OpeningScene.java is the enum of the seven approved beats in playback
+order (EXPLORATION, DISCOVERY, ENTERING, ARRIVAL, MONTAGE, MISSION, GAMEPLAY)
+with durations 7/7/6/7/12/12/4 seconds and two narration lines per scene,
+switching at each scene's midpoint. cutscene/OpeningCutscene.java is the
+JavaFX-free playback state machine: update(deltaTime) consumes scene-sized
+portions so large deltas land exactly on boundaries; skip() finishes early;
+cancel() finishes without the completion callback; reset() restarts at Scene 1;
+finish() is flag-guarded so onComplete runs at most once; fadeOpacity() returns
+1 - min(elapsed, remaining)/0.7 for cross-fades.
+
+GameState gains CUTSCENE. Game.startOpeningCinematic() moves MENU → CUTSCENE;
+Game.completeCutscene() moves CUTSCENE → PLAYING and spawns Arin via the shared
+private spawnPlayer() (the state guard makes the transition one-time);
+Game.cancelCutscene() moves CUTSCENE → MENU. startNewGame() is unchanged
+(MENU/GAME_OVER → PLAYING), so restart after defeat does not replay the story.
+During CUTSCENE there is no player: movePlayer and death detection stay gated on
+PLAYING, and invalid update time is still validated.
+
+ScreenManager.showMainMenu() sends Enter to the new showCutscene(), which builds
+a fresh OpeningCutscene and CutsceneScreen, attaches Esc/Space/Enter skip keys
+on the Scene, assigns the new pending Game AFTER setScene (that call re-enters
+leaveGame() via the scene-property listener, which would otherwise discard the
+session), and reuses the single shared GameLoop with update = cutscene::update
+and render = screen::render. No second AnimationTimer exists. Completion or
+skip takes the single finishCutscene() path: clear pendingGame, complete the
+session exactly once, then showGameplay(game) — the former showGame() body.
+leaveGame() also clears pendingGame, so an abandoned cinematic can never start
+gameplay later. CutsceneScreen renders placeholder procedural Canvas artwork in
+a scaled 960 by 600 design space; it owns no input and no timing. Full suite:
+258 tests. The user's visual walkthrough of the running cinematic remains
+pending. Earlier sections are historical contracts.
+## Phase 3.4 current contract: November 15, 2026
+
+Game() now creates MysticForest.create(); Game(GameWorld) accepts an explicit
+fixture world. GameWorld owns an immutable List<EnvironmentObject>, with a two-
+argument empty-world constructor retained. EnvironmentObject is a validated record
+with a Kind enum. TREE, ROCK and LARGE_ROOT alone expose separate hitboxes.
+Tree hitboxes cover the narrow trunk, not leaves/branches. Small roots, grass,
+bushes, paths, mist and fireflies have no collision. World positions and dimensions
+remain independent of camera offsets; the world stays 2880 by 1800.
+
+Game.movePlayer delegates to Player.move(axes,time,world), which reuses normalized
+movement and world clamping then applies CollisionManager.resolve. The manager
+sweeps the 24-unit bounding square continuously against expanded rectangles,
+selects earliest contact, snaps to its exact face and slides the remaining
+unblocked displacement. At most two contact passes remove both axis components.
+No pixel-based collision or JavaFX types enter domain code. Direct primitive
+Player movement still requires callers to apply world policy themselves.
+
+WorldRenderer in the reserved render package now owns temporary forest and player
+Canvas painting. GameScreen retains Canvas ownership, clip, camera, layout and
+navigation. Rendering culls off-view objects, translates by the camera, paints
+walkable layers, depth-ordered solids/player, then static mist/fireflies. Input,
+Camera, GameLoop and ScreenManager contracts are preserved. Controls remain in
+the separate strip inside the 960 by 600 initial Scene, as in Phase 3.3.
+
+The uploaded dark teal forest image supplies mood/color direction, not a fixed
+background asset. Tree spacing and decoration density were reduced after user
+feedback; large-root hitboxes and contact precision were revised. Full suite:
+224 passed. Final revised manual acceptance remains pending after Computer Use
+was stopped. See the development report for hitbox fractions, algorithms,
+exact files, checks and limits. Earlier sections are historical contracts.
+## Phase 3.3 current contract: closure November 15, 2026
+
+This revision supersedes the historical unrestricted-player statements below.
+Player coordinates are the top-left of its 24-unit body. Player.getSize supplies
+both drawing size and boundary size, replacing GameScreen's duplicated radius.
+Game.movePlayer gates on PLAYING, runs normal normalized delta-time movement,
+then calls Player.constrainToWorld(GameWorld). Start also constrains the player.
+Each axis clamps to [0, world dimension - player size], giving X [0,2856] and
+Y [0,1776] in the configured world. Player validates the world can fit its body.
+Character.moveBy delegates to protected final setPosition, which validates both
+coordinates before writing private x/y. No public coordinate setter was added.
+
+Both components clamp independently at corners; an unblocked diagonal component
+continues at its original normalized speed along an edge. Camera.java is unchanged.
+It observes bounded coordinates and uses actual Canvas dimensions. GameScreen
+reserves toolbar height plus margins below the Canvas to avoid hiding the player
+at the bottom edge; a dark pane background keeps controls readable. Scene size
+remains initially 960 by 600; usable Canvas height is smaller than scene height.
+Direct Player.move calls remain world-independent; gameplay uses Game.movePlayer.
+
+The complete suite passes 194 executions. Actual launch and user-confirmed edge,
+corner, release, departure and camera checks are recorded in the development
+report. No object collisions or Phase 3.4 work is included. Earlier dated sections
+remain history; the approved game design is unchanged.
+## Phase 3.1–3.2 architecture revision: November 14, 2026
+
+Current world/view contracts supersede the fixed center-offset description in
+the preserved Phase 2.4 record below. All gameplay/input APIs remain unchanged.
+
+- GameConfig keeps viewport dimensions at 960 x 600 and separately defines
+  WORLD_WIDTH=2880 and WORLD_HEIGHT=1800. These values are configuration choices,
+  not dependencies between screen size and map size.
+- Game owns one immutable GameWorld containing positive finite width and height.
+  getWorld() exposes it; restarting the player retains these immutable dimensions.
+- world.Camera is JavaFX-free and holds the viewport's top-left world coordinate.
+  follow(targetX, targetY, viewportWidth, viewportHeight) recalculates offsets;
+  worldToScreenX/Y subtract those offsets. It receives coordinates, not a mutable
+  Player, so it cannot modify the player by following it.
+- GameScreen receives Player, GameWorld, and its existing return callback. It
+  owns Camera as view state. Each render follows the current player using actual
+  Canvas dimensions, then draws the world/grid/border and player through that
+  camera. The existing loop continues to update the domain before rendering.
+- ScreenManager passes game.getWorld() into GameScreen; input, timing, navigation,
+  focus clearing, and loop cleanup remain unchanged.
+
+Camera math per axis is `max(0, min(target - viewportSize / 2,
+max(0, worldSize - viewportSize)))`. For a world at least as large as the viewport,
+the view stays inside world bounds. For a smaller world, that axis remains at 0;
+unused viewport area is neutral background, not additional world. Canvas clipping
+prevents world/player drawings from spilling into that area. No stretch or zoom
+is introduced. Resize is handled by using current Canvas size on every follow.
+
+World coordinates use (0,0) at the upper-left, positive X right and Y down.
+Arin's existing initial world position (0,0) remains unchanged. The temporary
+24-unit circle is now drawn with its upper-left anchored at the transformed player
+coordinate, so the entire marker is visible at the initial corner. When following
+in the interior, that anchor is at viewport center and the circle center is 12
+units right/down of it. This is a presentation-only offset, not a position change.
+The return button/controls are moved to the bottom-left so they do not cover the
+starting player. The title screen is unchanged and has no game loop.
+
+The grid uses 100-unit intervals only to reveal scrolling; it defines no tiles,
+obstacles, collision, or environmental content. Camera clamping is not player
+clamping. Out-of-world movement remains possible; clipping can make the player
+invisible outside the world. Reverse direction or restart the demo to return.
+Camera smoothing, player boundaries, camera zoom, assets, and later phases are
+not implemented. No GameRenderer hierarchy is needed for this temporary drawing.
+
+```text
+GameConfig world dimensions -> Game -> immutable GameWorld -> GameScreen/Camera
+InputHandler -> GameLoop delta -> Game.update + Game.movePlayer -> Player
+render callback -> Camera.follow(player x/y, Canvas width/height)
+                -> screen coordinate = world coordinate - camera offset
+                -> clipped grid/border/player Canvas drawing
+```
+
+Tests cover dimensions, initialization, follow/clamp on all edges, coordinate
+conversion, small/exact worlds, viewport resize, invalid arguments, and unchanged
+unrestricted player movement. Exact executed results are in the development report.
+
+## Phase 2.4 architecture revision: November 14, 2026
+
+This revision records the current source contracts and the user's expanded
+blueprint. The original proposal below remains historical design context.
+The user currently owns all implementation, architecture, and integration;
+no new division of work among team members is prescribed here.
+
+### Package mapping and future systems
+
+Working classes stay in their existing packages. The latest conceptual blueprint
+uses entities, rendering, and utilities; these map to current player/enemy,
+render, and utils respectively. Main stays in app. There is no migration or
+second copy of Character, Player, Main, or the renderer responsibilities.
+
+| Existing or future package | Responsibilities and planned classes |
+| --- | --- |
+| app | Existing Main starts JavaFX and delegates screen presentation |
+| core | Existing Game, GameState, GameConfig, GameLoop, FrameClock coordinate state, timing and update/render scheduling |
+| player, enemy | Existing Character/Player; future Enemy, Goblin, Wolf, Skeleton, DarkArcher, ShadowLord and their behaviors |
+| input | InputHandler tracks held movement/action keys, separate from player rules |
+| render | Future GameRenderer, WorldRenderer, PlayerRenderer draw state without mutating it |
+| world | Future GameWorld, Camera, CollisionManager, Portal for world data, camera following, collisions and portal interaction |
+| combat | Future CombatSystem, Attack, ComboSystem for damage, hit windows and combo timing |
+| items | Future Item, Weapon, HealthPotion, Key |
+| inventory | Future Inventory for carried items; use one implementation, not duplicate storage in items |
+| levels | Future Level and LevelManager for objectives and transitions across four levels |
+| ui | Existing ScreenManager/MainMenuScreen; minimal GameScreen now; future HUD, PauseMenu, InventoryScreen and other menus |
+| utils, persistence | Existing Direction; future genuinely shared helpers and save/load services |
+
+Only InputHandler and GameScreen are introduced in Phase 2.4. No empty future
+classes, duplicate systems, or new packages for unused functionality are added.
+The future full flow is input -> game update -> player/enemies/combat/world ->
+renderers/HUD -> Canvas. Game rules decide outcomes, rendering draws state, and
+input translates user actions. PROJECT_PLAN.md contains the current story,
+four-level portal design, planned features, and Phase 0–12 roadmap.
+
+### Implemented movement path
+
+```text
+Main -> ScreenManager.showMainMenu -> unchanged static Canvas title (no timer)
+  Enter -> ScreenManager.showGame -> new Game.startNewGame + GameScreen
+  Scene key filters -> InputHandler EnumSet<KeyCode>
+  GameLoop.handle -> Game.update(delta) -> Game.movePlayer(horizontal, vertical, delta)
+    -> Player.move(int, int, double) -> Character.moveBy
+  GameLoop render callback -> GameScreen.render -> placeholder circle on Canvas
+  Back to title / Scene replacement / window hidden -> stop loop + detach/clear input
+```
+
+The title retains its appearance; Enter is a minimal navigation shortcut managed
+by ScreenManager. Gameplay supplies a Back to title button. Each entry starts a
+fresh Game and Player; there is no resume/save menu yet. Character and GameState
+remain unchanged. Game and Player never import JavaFX or KeyCode.
+
+### New or refined contracts
+
+- `InputHandler.attach(Scene)` and `detach()` install/remove the same stored key
+  filters. Reattaching detaches the previous scene first. `press(KeyCode)`,
+  `release(KeyCode)`, `isPressed(KeyCode)`, `clear()` expose held-key operations.
+- `getHorizontal()` and `getVertical()` return int -1, 0, or 1. W/Up, S/Down,
+  A/Left, D/Right are aliases. Same-direction aliases never double speed;
+  opposite directions cancel. Space, E, Esc are tracked only; combat, interaction,
+  and pause actions are not implemented.
+- `Player.move(int horizontal, int vertical, double deltaTime)` accepts digital
+  axes in [-1,1], validates time, normalizes the nonzero vector, then applies
+  speed * seconds through Character.moveBy. The original Direction overload
+  delegates to this method; Direction remains the existing four-value enum.
+- `Game.movePlayer(int, int, double)` delegates only in PLAYING. Other states
+  ignore the command. Player still owns movement validation and arithmetic;
+  Game owns session gating. Existing update(double) behavior is preserved.
+- GameScreen owns only presentation, with `GameScreen(Player, Runnable)` and
+  `render()`. ScreenManager creates the session, attaches input, and supplies the
+  separate update/render callbacks after installing the Scene.
+
+All event and loop work stays on the JavaFX Application Thread. Losing window
+focus clears held keys so an unseen release cannot leave movement stuck. Scene
+replacement and window hiding stop the loop and detach input. Future code that
+replaces only a Scene root must explicitly leave the active session first.
+
+The player still starts at world (0,0). For this movement demo the screen maps
+world position to (Canvas width/2 + x, Canvas height/2 + y), a fixed viewport
+offset, not a following camera. Positive X is right and positive Y is down.
+The radius-12 circle is temporary. There are no world bounds or collisions;
+the player can leave the viewport. Use opposite movement or return to title and
+start again. No camera, illustrated asset, sprite animation or level is implied.
+
+## Original architecture proposal, retained for history
+
+> **Status:** Initial architecture proposal  
+> **Language:** Java 21  
+> **GUI/rendering:** JavaFX 21 + Canvas  
+> **Build:** Maven  
+> **Architecture style:** Modular, object-oriented, single-process desktop game
+
+---
+
+## 1. Architecture Goals
+
+The architecture should:
+
+- Separate game rules from JavaFX presentation.
+- Allow five members to work on different modules with limited file conflicts.
+- Keep player, enemy, inventory, and level logic testable without opening a game window.
+- Make the game loop and input flow easy to understand.
+- Demonstrate Java course concepts through meaningful functionality.
+- Start small and support incremental expansion.
+
+## 2. High-Level Module Diagram
+
+```mermaid
+flowchart TD
+    APP[app: Application Entry Point]
+    UI[ui: Menus, HUD, Screens]
+    CORE[core: Game Controller, State, Loop]
+    INPUT[input: Keyboard and UI Commands]
+    WORLD[levels: Level, Map, Doors, Obstacles]
+    PLAYER[player: Character and Player]
+    ENEMY[enemy: Enemy Types and Combat]
+    ITEMS[items: Items, Weapons, Inventory]
+    RENDER[render: Canvas Renderer and Assets]
+    SAVE[persistence: Save and Load]
+    UTILS[utils: Collision and Shared Helpers]
+
+    APP --> UI
+    APP --> CORE
+    UI --> CORE
+    INPUT --> CORE
+    CORE --> WORLD
+    CORE --> PLAYER
+    CORE --> ENEMY
+    CORE --> ITEMS
+    CORE --> RENDER
+    CORE --> SAVE
+    WORLD --> UTILS
+    PLAYER --> UTILS
+    ENEMY --> UTILS
+    RENDER --> WORLD
+    RENDER --> PLAYER
+    RENDER --> ENEMY
+    RENDER --> ITEMS
+```
+
+**Dependency rule:** Domain modules (`player`, `enemy`, `items`, `levels`) must not depend on JavaFX controls, Stage, Scene, or Canvas. The UI and renderer may read domain state and draw it, but should not own gameplay rules.
+
+## 3. Recommended Maven Directory Structure
+
+```text
+shadow-quest-lost-realm/
+├── pom.xml
+├── README.md
+├── CONTRIBUTING.md
+├── .gitignore
+├── docs/
+│   ├── PROJECT_PLAN.md
+│   └── ARCHITECTURE.md
+├── src/
+│   ├── main/
+│   │   ├── java/
+│   │   │   └── com/shadowquest/
+│   │   │       ├── app/
+│   │   │       │   └── Main.java
+│   │   │       ├── core/
+│   │   │       │   ├── Game.java
+│   │   │       │   ├── GameState.java
+│   │   │       │   └── GameConfig.java
+│   │   │       ├── input/
+│   │   │       │   └── InputHandler.java
+│   │   │       ├── player/
+│   │   │       │   ├── Character.java
+│   │   │       │   └── Player.java
+│   │   │       ├── enemy/
+│   │   │       │   ├── Enemy.java
+│   │   │       │   ├── Goblin.java
+│   │   │       │   ├── Orc.java
+│   │   │       │   ├── DarkArcher.java
+│   │   │       │   └── ShadowLord.java
+│   │   │       ├── items/
+│   │   │       │   ├── Item.java
+│   │   │       │   ├── Weapon.java
+│   │   │       │   ├── HealthPotion.java
+│   │   │       │   ├── Key.java
+│   │   │       │   ├── Inventory.java
+│   │   │       │   ├── Attackable.java
+│   │   │       │   └── Collectable.java
+│   │   │       ├── levels/
+│   │   │       │   ├── Level.java
+│   │   │       │   ├── ForestLevel.java
+│   │   │       │   ├── RuinsLevel.java
+│   │   │       │   ├── DungeonLevel.java
+│   │   │       │   └── CastleLevel.java
+│   │   │       ├── render/
+│   │   │       │   ├── GameRenderer.java
+│   │   │       │   └── AssetManager.java
+│   │   │       ├── ui/
+│   │   │       │   ├── ScreenManager.java
+│   │   │       │   ├── MainMenuScreen.java
+│   │   │       │   ├── GameScreen.java
+│   │   │       │   ├── PauseScreen.java
+│   │   │       │   ├── GameOverScreen.java
+│   │   │       │   └── VictoryScreen.java
+│   │   │       ├── persistence/
+│   │   │       │   ├── SaveService.java
+│   │   │       │   ├── SaveData.java
+│   │   │       │   └── InvalidSaveException.java
+│   │   │       └── utils/
+│   │   │           ├── Collision.java
+│   │   │           └── Direction.java
+│   │   └── resources/
+│   │       ├── images/
+│   │       ├── maps/
+│   │       ├── audio/
+│   │       └── styles/
+│   └── test/
+│       └── java/com/shadowquest/
+│           ├── player/
+│           ├── enemy/
+│           ├── items/
+│           ├── levels/
+│           └── persistence/
+└── .github/
+    └── PULL_REQUEST_TEMPLATE.md
+```
+
+This is a target structure, not a requirement to create every file in the first commit. Add classes when their phase begins. Package names may be refined, but changes must be agreed by the team.
+
+## 4. Module Responsibilities
+
+### 4.1 `app`
+
+- Contains the JavaFX `Application` subclass and startup entry point.
+- Creates the initial Stage and delegates screen flow to `ScreenManager`.
+- Must not contain combat, inventory, or level rules.
+
+### 4.2 `core`
+
+- Owns the active game session.
+- Coordinates player, current level, game state, update steps, and transitions.
+- Defines `GameState`, such as `MENU`, `PLAYING`, `PAUSED`, `GAME_OVER`, and `VICTORY`.
+- Does not draw UI elements.
+
+### 4.3 `input`
+
+- Converts keyboard input into game actions or an input-state object.
+- Tracks pressed movement keys so movement is continuous while a key is held.
+- Maps Space to attack, E to interact, and Esc to pause.
+- Does not directly change JavaFX screens from domain classes.
+
+### 4.4 `player`
+
+- Defines shared character properties in abstract `Character`.
+- Implements player movement state, health, defence, attack, and equipment interaction.
+- Exposes validated methods rather than allowing arbitrary direct field mutation.
+- Does not import JavaFX classes.
+
+### 4.5 `enemy`
+
+- Defines common enemy state and behaviour in `Enemy`.
+- Implements Goblin, Orc, DarkArcher, and ShadowLord.
+- Supports polymorphic update/attack behaviour.
+- Uses simple, bounded behaviour appropriate for the first version.
+
+### 4.6 `items`
+
+- Defines common `Item` data and item behaviour.
+- Implements weapons, health potions, and keys.
+- Owns inventory operations, capacity rules if used, and item-use validation.
+- Uses collections with generics.
+- Does not draw inventory UI.
+
+### 4.7 `levels`
+
+- Defines level dimensions/layout and collections of enemies, items, and obstacles.
+- Implements the four planned locations.
+- Owns doors, level exits, keys required for progression, and puzzle state.
+- Does not own player health or inventory internals.
+
+### 4.8 `render`
+
+- Draws the current game world and visible entities onto a JavaFX Canvas.
+- Loads assets from classpath resources.
+- Uses placeholder shapes if an optional sprite is unavailable.
+- Must not change health, defeat enemies, collect items, or advance levels as a side effect of drawing.
+
+### 4.9 `ui`
+
+- Owns menus, HUD, buttons, screen layout, and navigation.
+- Sends commands to the game controller.
+- Displays state supplied by the game/domain modules.
+- Does not duplicate game rules.
+
+### 4.10 `persistence`
+
+- Converts the necessary game state to and from a documented save format.
+- Validates loaded data before applying it.
+- Handles I/O errors and malformed data with meaningful exceptions/messages.
+- Does not serialize JavaFX objects, Canvas, Stage, or live event handlers.
+
+### 4.11 `utils`
+
+- Contains small reusable helpers such as collision calculations and shared direction types.
+- Avoid turning this package into a dumping ground for unrelated logic.
+
+## 5. Core Object Model
+
+```mermaid
+classDiagram
+    class Character {
+        <<abstract>>
+        -String name
+        -double health
+        -double maxHealth
+        -int attackPower
+        -int defense
+        +takeDamage(double amount)
+        +isAlive() boolean
+        +attack(Character target)
+        +update(double deltaTime)
+    }
+
+    class Player {
+        -double speed
+        -int coins
+        -Inventory inventory
+        +move(Direction direction, double deltaTime)
+        +collect(Item item)
+        +useItem(Item item)
+    }
+
+    class Enemy {
+        <<abstract>>
+        -int rewardCoins
+        +update(double deltaTime)
+        +attack(Character target)
+    }
+
+    class Goblin
+    class Orc
+    class DarkArcher
+    class ShadowLord
+
+    Character <|-- Player
+    Character <|-- Enemy
+    Enemy <|-- Goblin
+    Enemy <|-- Orc
+    Enemy <|-- DarkArcher
+    Enemy <|-- ShadowLord
+    Player *-- Inventory
+```
+
+The diagram is conceptual. Exact fields and signatures must be agreed before implementation. Avoid adding duplicate health or attack fields to subclasses if they already exist in `Character`.
+
+### Important design choice: `Character` and `Enemy`
+
+Use one abstract `Character` base class for shared character properties and operations. `Player` and `Enemy` extend it. `Enemy` is also abstract and provides enemy-specific common behaviour. This avoids making `Enemy` an unrelated hierarchy.
+
+### Interfaces
+
+Use interfaces only where they express a useful capability:
+
+- `Attackable`: a target that can receive an attack/damage operation.
+- `Collectable`: an object that can be collected or interacted with.
+
+Do not force every item or character to implement an interface if it does not make semantic sense.
+
+## 6. Initial API Contracts
+
+These signatures are proposed integration contracts. The team should approve them before parallel implementation. Codex must not silently invent incompatible alternatives.
+
+### `Character`
+
+```java
+public abstract class Character {
+    protected Character(String name, double maxHealth, int attackPower, int defense);
+
+    public String getName();
+    public double getHealth();
+    public double getMaxHealth();
+    public int getAttackPower();
+    public int getDefense();
+    public boolean isAlive();
+
+    public void takeDamage(double amount);
+    public void heal(double amount);
+
+    public abstract void update(double deltaTime);
+    public abstract void attack(Character target);
+}
+```
+
+Implementation note: fields should preferably be `private`; use `protected` constructors and methods only when inheritance genuinely requires them. Reject negative damage/healing and clamp health to valid bounds.
+
+### `Player`
+
+```java
+public class Player extends Character {
+    public Player(String name);
+    public double getSpeed();
+    public Inventory getInventory();
+
+    public void move(Direction direction, double deltaTime);
+    public void collect(Item item);
+    public boolean useItem(Item item);
+}
+```
+
+Movement should be expressed in world coordinates and constrained by collision/level boundaries. The UI should not directly set arbitrary player coordinates.
+
+### `Enemy`
+
+```java
+public abstract class Enemy extends Character {
+    public int getRewardCoins();
+    public abstract void update(double deltaTime, Player player);
+}
+```
+
+If the team chooses a shared `update(double deltaTime)` contract instead, keep player-awareness in a separate AI method/service. Do not create inconsistent update signatures across enemy types.
+
+### `Inventory`
+
+```java
+public class Inventory {
+    public boolean addItem(Item item);
+    public boolean removeItem(Item item);
+    public boolean containsItem(String itemId);
+    public List<Item> getItems();
+}
+```
+
+Return an unmodifiable view or defensive copy from `getItems()` so callers cannot bypass inventory rules.
+
+### `Level`
+
+```java
+public abstract class Level {
+    public String getId();
+    public String getDisplayName();
+    public List<Enemy> getEnemies();
+    public List<Item> getItems();
+
+    public abstract void initialize();
+    public abstract boolean isCompleted();
+}
+```
+
+Collections exposed to other modules should not allow uncontrolled mutation. Add explicit methods for adding/removing defeated enemies or collected items.
+
+### `Game`
+
+```java
+public class Game {
+    public Game();
+
+    public GameState getState();
+    public Player getPlayer();
+    public Level getCurrentLevel();
+
+    public void startNewGame();
+    public void pause();
+    public void resume();
+    public void update(double deltaTime);
+}
+```
+
+The `Game` controller is the coordination point. Keep UI navigation in `ScreenManager`.
+
+These are starting contracts, not permission to implement all classes at once. Refine them with the team and update this document when a deliberate API change is approved.
+
+## 7. Game Loop and Threading
+
+Use JavaFX `AnimationTimer` for the first version.
+
+Conceptual flow:
+
+```text
+AnimationTimer.handle(now)
+    calculate deltaTime
+    if game state is PLAYING:
+        read current input state
+        update player
+        update enemies
+        process combat and collisions
+        process collection/interactions
+        check level completion and player death
+    render current state to Canvas
+```
+
+Rules:
+
+- Keep update logic separate from rendering.
+- Use `deltaTime` for movement so speed is not tied directly to frame rate.
+- Do not use `Thread.sleep()` on the JavaFX Application Thread.
+- Keep JavaFX scene graph and UI changes on the JavaFX Application Thread.
+- Do not introduce multithreading unless asset loading or another measured task requires it.
+- Prevent repeated attacks/interactions from firing every frame unintentionally; use input edge detection or cooldowns.
+
+## 8. Coordinate, Collision, and Map Conventions
+
+Agree on these conventions before implementing movement/rendering:
+
+- Use a consistent world coordinate system with `(0, 0)` at the top-left.
+- Positive X points right; positive Y points down.
+- Keep world positions and screen positions conceptually separate if camera scrolling is later added.
+- Define tile size and viewport size in one configuration class.
+- Use a simple rectangle/AABB collision system initially.
+- Separate solid obstacles from collectible/interactable objects.
+- Use placeholder rectangles and colours before final art assets are integrated.
+
+Initial proposed viewport: `960 × 600`. Initial tile size: `32` pixels. These are configurable starting values, not hard-coded assumptions across the codebase.
+
+## 9. Game State and Screen Flow
+
+```mermaid
+stateDiagram-v2
+    [*] --> MENU
+    MENU --> PLAYING: Play
+    MENU --> [*]: Exit
+    PLAYING --> PAUSED: Esc
+    PAUSED --> PLAYING: Resume
+    PAUSED --> MENU: Main Menu
+    PLAYING --> GAME_OVER: Player defeated
+    GAME_OVER --> PLAYING: Restart
+    GAME_OVER --> MENU: Main Menu
+    PLAYING --> VICTORY: Shadow Lord defeated
+    VICTORY --> MENU: Main Menu
+```
+
+Represent finite states with an enum. Ensure pause stops gameplay updates while still allowing UI interaction.
+
+## 10. Save/Load Design
+
+Save only domain data required to reconstruct the game:
+
+- Save format version.
+- Player health and relevant stats.
+- Current level identifier.
+- Player position.
+- Coins.
+- Inventory item identifiers and required item data.
+- Level progression and required puzzle/door state.
+
+Do not save Java object memory, JavaFX nodes, event handlers, or image objects.
+
+Requirements:
+
+- Use a documented format such as JSON or a simple versioned text format.
+- Write saves safely; avoid leaving a partially written save if possible.
+- Validate all loaded values and identifiers.
+- Handle missing files separately from corrupted files.
+- Use a custom `InvalidSaveException` only if it improves clarity.
+- Never silently accept impossible values such as negative health, unknown level IDs, or invalid item identifiers.
+
+Persistence is a later milestone. Do not block the first playable prototype on it.
+
+## 11. Exception and Validation Policy
+
+Use exceptions for exceptional/recoverable failures:
+
+- File read/write failure.
+- Malformed or unsupported save data.
+- Required asset unavailable when no fallback is possible.
+- Invalid external configuration.
+
+Use normal return values or game state for expected gameplay outcomes:
+
+- Player takes damage.
+- Enemy dies.
+- Inventory is full.
+- Door is locked.
+- Player cannot collect an item.
+
+Validate constructor arguments and public state-changing methods. Error messages should explain what failed and what the user can do next.
+
+## 12. Testing Strategy
+
+Use JUnit 5 for domain tests if included in the Maven setup.
+
+Test at least:
+
+- Player health cannot exceed max health or fall below zero.
+- Damage and healing reject invalid values.
+- Enemy defeat and reward logic occur once.
+- Different enemy subclasses exhibit polymorphic behaviour.
+- Inventory add/remove/contains behaviour.
+- Key checks and level transition rules.
+- Collision boundaries.
+- Save/load round-trip.
+- Missing and corrupted save files.
+- Game-state transitions and pause behaviour.
+
+Keep most tests independent of JavaFX. UI smoke tests can be manual initially.
+
+## 13. Asset Management
+
+- Store assets under `src/main/resources/`.
+- Load resources through classpath/resource APIs, not machine-specific absolute paths.
+- Provide a placeholder fallback for non-essential images.
+- Keep filenames lowercase and use hyphens or underscores consistently.
+- Track asset source, author, and license in `docs/ASSETS.md` or the README.
+- Do not commit assets unless the team has permission to use and redistribute them.
+
+## 14. Build and Code Conventions
+
+- Use Maven; commit `pom.xml` and preferably Maven Wrapper.
+- Target Java 21 unless the course lab machines require another agreed version.
+- Use package prefix `com.shadowquest`.
+- Use `PascalCase` for classes, `camelCase` for methods/variables, and `UPPER_SNAKE_CASE` for constants.
+- Keep fields private by default.
+- Prefer small methods with one responsibility.
+- Use generics; avoid raw collections.
+- Avoid static mutable global game state.
+- Do not put all game logic in `Main.java`.
+- Add comments to explain non-obvious decisions, not every line.
+- Keep commits and pull requests focused.
+
+## 15. Integration Contract Between Members
+
+Before implementation begins, the team must agree on:
+
+1. The exact Java version and Maven setup.
+2. Package ownership and file ownership.
+3. The initial API signatures in Section 6.
+4. Coordinate units, tile size, and viewport.
+5. Who owns `Game`, `GameState`, input, and renderer integration.
+6. How the renderer reads entities without mutating them.
+7. How level transitions are requested and reported.
+8. The save format and the state included in it.
+
+When an API change is necessary:
+
+- Open an issue or discuss it with the affected module owners.
+- Update this architecture document.
+- Update callers and tests in the same pull request where practical.
+- Do not merge a breaking change without notifying dependent members.
+
+## 16. Architecture Decision Summary
+
+| Decision | Initial choice | Reason |
+|---|---|---|
+| Language | Java 21 | Modern LTS baseline |
+| GUI | JavaFX | Course GUI and event handling requirements |
+| Rendering | Canvas | Suitable for a simple 2D game world |
+| Build | Maven | Repeatable dependency/build setup |
+| Game loop | AnimationTimer | JavaFX-native frame updates |
+| Domain/UI separation | Separate packages | Easier testing and team collaboration |
+| Collision | AABB rectangles | Simple and sufficient for prototype |
+| Collections | ArrayList and Set as appropriate | Type-safe game entity storage |
+| Persistence | Versioned JSON or text, later phase | Easy to validate and evolve |
+| Version control | Fork + feature branch + PR | Controlled group integration |
+
+---
+
+**Architecture principle:** Build a small, working vertical slice first. Do not generate the entire game in one step. Every module should integrate through agreed contracts and remain independently testable.
